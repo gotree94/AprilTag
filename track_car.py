@@ -2,12 +2,14 @@ import cv2
 import numpy as np
 import pupil_apriltags as apriltag
 import csv
+import json
 import time
 from pathlib import Path
 
 VIDEO_PATH = Path(__file__).parent / "cam.mp4"
 OUTPUT_VIDEO_PATH = Path(__file__).parent / "output.mp4"
 OUTPUT_CSV_PATH = Path(__file__).parent / "position.csv"
+ROI_CONFIG_PATH = Path(__file__).parent / "roi_config.json"
 
 TAG_IDS = [0, 1, 2, 3]
 
@@ -104,9 +106,115 @@ def estimate_floor_position(tags, H):
 
 TAG_EDGES = [(0, 1), (1, 2), (2, 3), (3, 0)]
 
+# Car tracker state
+_car_tracker = {}
+_CAR_THRESH = 80
+_CAR_DEFAULT_MIN_AREA = 400
 
-def draw_overlay(frame, tags, car_center_img, car_center_world, H, fps):
+# Load ROIs from config file or fall back to hardcoded defaults
+_FALLBACK_ROIS = [
+    {"label": "Car 1", "x": 550, "y": 200, "w": 200, "h": 250},
+    {"label": "Car 2", "x": 950, "y": 888, "w": 130, "h": 22},
+]
+
+
+def _roi_color(index):
+    palette = [(0, 200, 255), (255, 200, 0), (0, 255, 100),
+               (255, 100, 255), (100, 200, 255)]
+    return palette[index % len(palette)]
+
+
+def load_roi_config():
+    try:
+        with open(ROI_CONFIG_PATH) as f:
+            data = json.load(f)
+        rois = data.get("rois", [])
+        if rois:
+            print(f"Loaded {len(rois)} ROI(s) from {ROI_CONFIG_PATH}")
+            for r in rois:
+                print(f"  {r['label']}: ({r['x']}, {r['y']}, {r['w']}, {r['h']})")
+            return rois
+    except (FileNotFoundError, json.JSONDecodeError, KeyError):
+        pass
+    print("Using default ROI configuration")
+    return _FALLBACK_ROIS.copy()
+
+
+def detect_cars(gray, rois):
+    global _car_tracker
+
+    _, dark = cv2.threshold(gray, _CAR_THRESH, 255, cv2.THRESH_BINARY_INV)
+
+    results = {}
+
+    for r in rois:
+        label = r["label"]
+        rx, ry, rw, rh = r["x"], r["y"], r["w"], r["h"]
+        roi = dark[ry:ry+rh, rx:rx+rw]
+        cnts, _ = cv2.findContours(roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        min_area = r.get("min_area", _CAR_DEFAULT_MIN_AREA)
+        best = None
+        for c in cnts:
+            a = cv2.contourArea(c)
+            if a < min_area:
+                continue
+            x, y, w, h = cv2.boundingRect(c)
+            gx, gy = x + rx, y + ry
+            if best is None or a > best[0]:
+                best = (a, (gx, gy, w, h))
+        if best is not None:
+            a, (gx, gy, w, h) = best
+            results[label] = {
+                "bbox": (gx, gy, w, h),
+                "centroid": (gx + w // 2, gy + h // 2),
+                "area": a,
+            }
+
+    _car_tracker = results
+    return results
+
+
+def draw_overlay(frame, tags, car_center_img, car_center_world, H, fps, cars=None):
     h, w = frame.shape[:2]
+
+    if cars:
+        for i, (label, info) in enumerate(cars.items()):
+            gx, gy, bw, bh = info["bbox"]
+            cx, cy = info["centroid"]
+            color = _roi_color(i)
+            cv2.rectangle(frame, (gx, gy), (gx + bw, gy + bh), color, 2)
+            cv2.circle(frame, (cx, cy), 5, color, -1)
+
+            coord_text = f"({cx},{cy})"
+            (tw, th), _ = cv2.getTextSize(coord_text, cv2.FONT_HERSHEY_SIMPLEX, 0.4, 1)
+            cv2.putText(frame, coord_text, (cx - tw // 2, cy + th // 2),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+
+            (lw, lh), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)
+            lx, ly = gx, max(gy - 8, 20)
+            cv2.rectangle(frame, (lx - 2, ly - lh - 2), (lx + lw + 2, ly + 2), color, -1)
+            cv2.putText(frame, label, (lx, ly), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2)
+
+            dist_lines = []
+            for tid, r in tags.items():
+                if H is not None:
+                    car_w = cv2.perspectiveTransform(
+                        np.float32([[[cx, cy]]]), H).reshape(2)
+                    tag_w = cv2.perspectiveTransform(
+                        r.center.reshape(1, 1, 2).astype(np.float32), H).reshape(2)
+                    dmm = np.linalg.norm(car_w - tag_w)
+                    dist_lines.append(f"T{tid}:{dmm:.0f}mm")
+                else:
+                    dpx = np.linalg.norm(np.float32([cx - r.center[0], cy - r.center[1]]))
+                    dist_lines.append(f"T{tid}:{dpx:.0f}px")
+
+            dist_text = "  ".join(dist_lines)
+            (dw, dh), _ = cv2.getTextSize(dist_text, cv2.FONT_HERSHEY_SIMPLEX, 0.4, 1)
+            dx = min(cx - dw // 2, w - dw - 10)
+            dy = min(gy + bh + dh + 14, h - 10)
+            dx = max(dx, 10)
+            cv2.rectangle(frame, (dx - 2, dy - dh - 2), (dx + dw + 2, dy + 2), (0, 0, 0), -1)
+            cv2.putText(frame, dist_text, (dx, dy), cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
 
     for tid, r in tags.items():
         corners = r.corners.astype(int)
@@ -209,6 +317,8 @@ def main():
         decode_sharpening=0.5,
     )
 
+    rois = load_roi_config()
+
     # Find a frame with all 4 tags to calibrate the homography
     print("Calibrating homography from first frame with all 4 tags...")
     H = None
@@ -231,11 +341,17 @@ def main():
     writer = cv2.VideoWriter(str(OUTPUT_VIDEO_PATH),
                              cv2.VideoWriter_fourcc(*"mp4v"), FPS, (W, FRAME_H))
 
+    csv_fields = ["frame",
+                   "tag0_x", "tag0_y", "tag1_x", "tag1_y",
+                   "tag2_x", "tag2_y", "tag3_x", "tag3_y",
+                   "car_x_mm", "car_y_mm", "car_x_px", "car_y_px"]
+    for r in rois:
+        label = r["label"].replace(" ", "_")
+        csv_fields += [f"{label}_x", f"{label}_y", f"{label}_w", f"{label}_h"]
+
     csv_fp = open(OUTPUT_CSV_PATH, "w", newline="")
     csv_w = csv.writer(csv_fp)
-    csv_w.writerow(["frame", "tag0_x", "tag0_y", "tag1_x", "tag1_y",
-                     "tag2_x", "tag2_y", "tag3_x", "tag3_y",
-                     "car_x_mm", "car_y_mm", "car_x_px", "car_y_px"])
+    csv_w.writerow(csv_fields)
 
     frame_idx = 0
     t0 = time.perf_counter()
@@ -246,6 +362,7 @@ def main():
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         tags = detect_tags(gray, detector)
+        cars = detect_cars(gray, rois)
         car_center_img = compute_car_center(tags)
         car_center_world = estimate_floor_position(tags, H)
 
@@ -256,9 +373,16 @@ def main():
         row += [f"{car_center_world[1]:.1f}" if car_center_world is not None else ""]
         row += [f"{car_center_img[0]:.1f}" if car_center_img is not None else ""]
         row += [f"{car_center_img[1]:.1f}" if car_center_img is not None else ""]
+        for r in rois:
+            label = r["label"]
+            if label in cars:
+                gx, gy, bw, bh = cars[label]["bbox"]
+                row += [gx, gy, bw, bh]
+            else:
+                row += ["", "", "", ""]
         csv_w.writerow(row)
 
-        draw_overlay(frame, tags, car_center_img, car_center_world, H, FPS)
+        draw_overlay(frame, tags, car_center_img, car_center_world, H, FPS, cars)
         writer.write(frame)
 
         if not headless:
