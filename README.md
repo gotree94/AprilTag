@@ -64,8 +64,8 @@ pip install opencv-python numpy pupil-apriltags pillow
 
 **생성된 태그:**
 
-| ID 0 | ID 1 | ID 2 | ID 3 | ID 4 |
-|:----:|:----:|:----:|:----:|:----:|
+| ID 0 | ID 1 | ID 2 | ID 3 | ID 4 | |
+|:----:|:----:|:----:|:----:|:----:|:----:|
 | ![](tag/tag36h11_0.png) | ![](tag/tag36h11_1.png) | ![](tag/tag36h11_2.png) | ![](tag/tag36h11_3.png) | ![](tag/tag36h11_4.png) | |
 
 | ID 5 | ID 6 | ID 7 | ID 8 | ID 9 | ID 10 |
