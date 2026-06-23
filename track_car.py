@@ -153,21 +153,37 @@ def detect_cars(gray, rois):
         roi = dark[ry:ry+rh, rx:rx+rw]
         cnts, _ = cv2.findContours(roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         min_area = r.get("min_area", _CAR_DEFAULT_MIN_AREA)
-        best = None
+        best_cnt = None
+        best_a = 0
+        best_box = None
         for c in cnts:
             a = cv2.contourArea(c)
             if a < min_area:
                 continue
             x, y, w, h = cv2.boundingRect(c)
             gx, gy = x + rx, y + ry
-            if best is None or a > best[0]:
-                best = (a, (gx, gy, w, h))
-        if best is not None:
-            a, (gx, gy, w, h) = best
+            if best_cnt is None or a > best_a:
+                best_cnt = c
+                best_a = a
+                best_box = (gx, gy, w, h)
+        if best_cnt is not None:
+            cnt, a, (gx, gy, w, h) = best_cnt, best_a, best_box
+            angle = 0.0
+            if len(cnt) >= 5:
+                rect = cv2.minAreaRect(cnt)
+                (rw, rh), ra = rect[1], rect[2]
+                if rw < rh:
+                    ra += 90
+                angle = ra % 180
+                prev = _car_tracker.get(label, {}).get("angle")
+                if prev is not None and abs(angle - prev) > 90:
+                    angle = angle - 180 if angle > prev else angle + 180
+            cx, cy = gx + w // 2, gy + h // 2
             results[label] = {
                 "bbox": (gx, gy, w, h),
-                "centroid": (gx + w // 2, gy + h // 2),
+                "centroid": (cx, cy),
                 "area": a,
+                "angle": angle,
             }
 
     _car_tracker = results
@@ -177,11 +193,16 @@ def detect_cars(gray, rois):
 def draw_overlay(frame, tags, car_center_img, car_center_world, H, fps, cars=None):
     h, w = frame.shape[:2]
 
+    car_labels = list(cars.keys()) if cars else []
+    car_angles = {}
     if cars:
         for i, (label, info) in enumerate(cars.items()):
             gx, gy, bw, bh = info["bbox"]
             cx, cy = info["centroid"]
+            angle = info.get("angle", 0)
+            car_angles[label] = angle
             color = _roi_color(i)
+
             cv2.rectangle(frame, (gx, gy), (gx + bw, gy + bh), color, 2)
             cv2.circle(frame, (cx, cy), 5, color, -1)
 
@@ -194,6 +215,20 @@ def draw_overlay(frame, tags, car_center_img, car_center_world, H, fps, cars=Non
             lx, ly = gx, max(gy - 8, 20)
             cv2.rectangle(frame, (lx - 2, ly - lh - 2), (lx + lw + 2, ly + 2), color, -1)
             cv2.putText(frame, label, (lx, ly), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2)
+
+            a_disp = angle % 360
+            a_text = f"{a_disp:.0f}deg"
+            (aw, ah), _ = cv2.getTextSize(a_text, cv2.FONT_HERSHEY_SIMPLEX, 0.4, 1)
+            ax2 = min(gx + bw - aw - 4, w - 10)
+            ay2 = gy + bh - 6
+            cv2.rectangle(frame, (ax2 - 2, ay2 - ah - 2), (ax2 + aw + 2, ay2 + 2), color, -1)
+            cv2.putText(frame, a_text, (ax2, ay2), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0), 1)
+
+            rad = np.deg2rad(angle)
+            arrow_len = max(bw, bh) // 2 + 10
+            ax = int(cx + arrow_len * np.cos(rad))
+            ay = int(cy + arrow_len * np.sin(rad))
+            cv2.arrowedLine(frame, (cx, cy), (ax, ay), color, 2, cv2.LINE_AA, tipLength=0.3)
 
             dist_lines = []
             for tid, r in tags.items():
@@ -215,6 +250,36 @@ def draw_overlay(frame, tags, car_center_img, car_center_world, H, fps, cars=Non
             dx = max(dx, 10)
             cv2.rectangle(frame, (dx - 2, dy - dh - 2), (dx + dw + 2, dy + 2), (0, 0, 0), -1)
             cv2.putText(frame, dist_text, (dx, dy), cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
+
+    if len(car_labels) >= 2 and "Car 1" in cars and "Car 2" in cars:
+        c1 = cars["Car 1"]
+        c2 = cars["Car 2"]
+        x1, y1 = c1["centroid"]
+        x2, y2 = c2["centroid"]
+        a1 = car_angles.get("Car 1", 0)
+        dx = x2 - x1
+        dy = y2 - y1
+        dist_px = np.linalg.norm(np.float32([dx, dy]))
+        target_deg = np.rad2deg(np.arctan2(dy, dx))
+        steer = (target_deg - a1 + 180) % 360 - 180
+
+        if H is not None:
+            w1 = cv2.perspectiveTransform(np.float32([[[x1, y1]]]), H).reshape(2)
+            w2 = cv2.perspectiveTransform(np.float32([[[x2, y2]]]), H).reshape(2)
+            dist_mm = np.linalg.norm(w2 - w1)
+            dist_str = f"{dist_mm:.0f}mm"
+        else:
+            dist_str = f"{dist_px:.0f}px"
+
+        cv2.arrowedLine(frame, (x1, y1), (x2, y2), (100, 255, 255), 2, cv2.LINE_AA, tipLength=0.06)
+        mid_x, mid_y = (x1 + x2) // 2, (y1 + y2) // 2
+        heading_disp = target_deg % 360
+        nav_text = f"Target: {dist_str}  Heading: {heading_disp:.0f}deg  Steer: {steer:+.0f}deg"
+        (nw, nh), _ = cv2.getTextSize(nav_text, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
+        nx = min(max(mid_x - nw // 2, 10), w - nw - 10)
+        ny = min(mid_y - 10, h - 10)
+        cv2.rectangle(frame, (nx - 2, ny - nh - 2), (nx + nw + 2, ny + 2), (100, 100, 0), -1)
+        cv2.putText(frame, nav_text, (nx, ny), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 100), 1)
 
     for tid, r in tags.items():
         corners = r.corners.astype(int)
@@ -347,7 +412,8 @@ def main():
                    "car_x_mm", "car_y_mm", "car_x_px", "car_y_px"]
     for r in rois:
         label = r["label"].replace(" ", "_")
-        csv_fields += [f"{label}_x", f"{label}_y", f"{label}_w", f"{label}_h"]
+        csv_fields += [f"{label}_x", f"{label}_y", f"{label}_w", f"{label}_h",
+                       f"{label}_angle"]
 
     csv_fp = open(OUTPUT_CSV_PATH, "w", newline="")
     csv_w = csv.writer(csv_fp)
@@ -377,9 +443,10 @@ def main():
             label = r["label"]
             if label in cars:
                 gx, gy, bw, bh = cars[label]["bbox"]
-                row += [gx, gy, bw, bh]
+                angle = cars[label].get("angle", "")
+                row += [gx, gy, bw, bh, f"{angle:.1f}" if angle != "" else ""]
             else:
-                row += ["", "", "", ""]
+                row += ["", "", "", "", ""]
         csv_w.writerow(row)
 
         draw_overlay(frame, tags, car_center_img, car_center_world, H, FPS, cars)
