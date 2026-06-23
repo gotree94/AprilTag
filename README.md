@@ -48,6 +48,13 @@ pip install opencv-python numpy pupil-apriltags
 
 ## 3. 시스템 구성
 
+ |  TAG 0 |   TAG 1  |
+ |:------:|:------:|
+ | ![](tag36h11_id0.png)  | ![](tag36h11_id1.png)  |
+ |   TAG 2  |   TAG 3  |
+ | ![](tag36h11_id2.png)  | ![](tag36h11_id3.png) |
+
+
 ### 3.1 태그 배치
 
 ```
@@ -241,6 +248,9 @@ python track_car.py --headless
 - **빨간색 화살표** — 태그 → 차량 중심 방향 및 상대 좌표(mm)
 - **빨간색 원** — 차량 중심점
 - **상단 정보창** — 차량 위치(mm), 픽셀 좌표, FPS
+
+
+![](cap.png)
 
 ---
 
