@@ -250,7 +250,7 @@ python track_car.py --headless
 - **상단 정보창** — 차량 위치(mm), 픽셀 좌표, FPS
 
 
-![](cap.png)
+![](cap001.png)
 
 ---
 
